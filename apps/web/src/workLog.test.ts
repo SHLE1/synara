@@ -3761,6 +3761,13 @@ describe("deriveWorkLogEntries context window handling", () => {
     const entries = deriveWorkLogEntries(
       [
         makeActivity({
+          id: "consumption-1",
+          turnId: "turn-1",
+          kind: "token-usage.updated",
+          summary: "Token consumption updated",
+          tone: "info",
+        }),
+        makeActivity({
           id: "context-1",
           turnId: "turn-1",
           kind: "context-window.updated",

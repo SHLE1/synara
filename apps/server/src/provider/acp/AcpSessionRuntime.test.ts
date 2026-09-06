@@ -20,6 +20,7 @@ import {
   teardownAcpChildProcess,
 } from "./AcpSessionRuntime.ts";
 import * as AcpErrors from "./AcpErrors.ts";
+import { parseGrokPromptResponseConsumption } from "./GrokAcpUsage.ts";
 
 describe("makeAcpIncomingFrameGuard", () => {
   const encode = (value: string) => new TextEncoder().encode(value);
@@ -500,6 +501,49 @@ describe("AcpSessionRuntime initialize validation", () => {
       teardownProcessTree: async () => ({ escalated: false, signalErrors: [] }),
     }).pipe(Layer.provide(spawnerLayer));
   };
+
+  it("preserves real Grok response metadata for per-prompt consumption", async () => {
+    const agentApp = OfficialAcp.agent({ name: "grok-usage-agent" })
+      .onRequest(OfficialAcp.methods.agent.initialize, () => ({
+        protocolVersion: 1,
+        agentCapabilities: {},
+        authMethods: [],
+      }))
+      .onRequest(OfficialAcp.methods.agent.session.new, () => ({ sessionId: "usage-session" }))
+      .onRequest(OfficialAcp.methods.agent.session.prompt, () => ({
+        stopReason: "end_turn",
+        _meta: {
+          sessionId: "usage-session",
+          requestId: "native-prompt",
+          promptId: "native-prompt",
+          totalTokens: 28262,
+          usage: {
+            inputTokens: 28238,
+            outputTokens: 24,
+            totalTokens: 28262,
+            cachedReadTokens: 0,
+            reasoningTokens: 19,
+          },
+        },
+      }));
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const runtime = yield* AcpSessionRuntime;
+        const started = yield* runtime.start();
+        const result = yield* runtime.prompt({ prompt: [{ type: "text", text: "hello" }] });
+        expect(parseGrokPromptResponseConsumption(result, started.sessionId)).toEqual({
+          sourceId: "native-prompt",
+          usage: {
+            inputTokens: 28238,
+            outputTokens: 24,
+            totalTokens: 28262,
+            cachedInputTokens: 0,
+            reasoningOutputTokens: 19,
+          },
+        });
+      }).pipe(Effect.provide(makeRuntimeLayer(agentApp, () => Effect.void)), Effect.scoped),
+    );
+  });
 
   it("validates after initialize and before session/new", async () => {
     const calls: string[] = [];

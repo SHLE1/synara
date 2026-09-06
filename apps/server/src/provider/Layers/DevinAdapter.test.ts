@@ -14,6 +14,7 @@ import { ProviderAdapterProcessError } from "../Errors.ts";
 import { ServerConfig } from "../../config.ts";
 import * as AcpErrors from "../acp/AcpErrors.ts";
 import type { AcpSessionRuntimeShape } from "../acp/AcpSessionRuntime.ts";
+import { makeLifecycleAcpRuntime as makeAcpRuntimeFixture } from "../acp/AcpRuntimeTestFixture.ts";
 import type { DevinAcpRuntimeInput } from "../acp/DevinAcpSupport.ts";
 import type { AcpParsedSessionEvent } from "../acp/AcpRuntimeModel.ts";
 import { DevinAdapter } from "../Services/DevinAdapter.ts";
@@ -70,56 +71,13 @@ function makeFakeAcpRuntime(initialModeState?: {
   return { runtime, calls };
 }
 
-function makeLifecycleAcpRuntime(
-  prompt: AcpSessionRuntimeShape["prompt"] = () =>
-    Effect.succeed({ stopReason: "end_turn" } as Acp.PromptResponse),
-): AcpSessionRuntimeShape {
-  const registerHandler = () => Effect.void;
-  return {
-    handleRequestPermission: registerHandler,
-    handleElicitation: registerHandler,
-    handleReadTextFile: registerHandler,
-    handleWriteTextFile: registerHandler,
-    handleCreateTerminal: registerHandler,
-    handleTerminalOutput: registerHandler,
-    handleTerminalWaitForExit: registerHandler,
-    handleTerminalKill: registerHandler,
-    handleTerminalRelease: registerHandler,
-    handleSessionUpdate: registerHandler,
-    handleElicitationComplete: registerHandler,
-    handleExtRequest: registerHandler,
-    handleExtNotification: registerHandler,
-    start: () =>
-      Effect.succeed({
-        sessionId: "devin-test-session",
-        initializeResult: {} as Acp.InitializeResponse,
-        sessionSetupResult: {} as Acp.NewSessionResponse,
-        modelConfigId: undefined,
-        sessionSetupMethod: "new",
-      }),
-    awaitExit: Effect.never,
-    getEvents: () => Stream.never,
-    sessionUpdatesEnqueuedCount: Effect.succeed(0),
-    supportsSessionFork: Effect.succeed(false),
-    supportsSessionRecovery: Effect.succeed(true),
-    getModeState: Effect.succeed({
-      currentModeId: "bypass",
-      availableModes: [{ id: "bypass", name: "Full Access" }],
-    }),
-    getSessionEpoch: () => Effect.succeed(0 as never),
-    getPendingSessionNotificationCount: () => Effect.succeed(0),
-    getConfigOptions: Effect.succeed([]),
-    getAvailableCommands: Effect.succeed([]),
-    awaitLoadReplayReady: Effect.void,
-    prompt,
-    cancel: Effect.void,
-    setMode: () => Effect.succeed({} as Acp.SetSessionModeResponse),
-    setConfigOption: () => Effect.succeed({} as Acp.SetSessionConfigOptionResponse),
-    setModel: () => Effect.void,
-    forkSession: () => Effect.succeed({} as Acp.ForkSessionResponse),
-    request: () => Effect.succeed({}),
-    notify: () => Effect.void,
-  } as AcpSessionRuntimeShape;
+
+function makeLifecycleAcpRuntime(prompt?: AcpSessionRuntimeShape["prompt"]) {
+  return makeAcpRuntimeFixture(prompt, {
+    sessionId: "devin-test-session",
+    mode: "bypass",
+    modeName: "Full Access",
+  });
 }
 
 function makeEventAcpRuntime(prompt: AcpSessionRuntimeShape["prompt"]) {

@@ -21,6 +21,7 @@ import { Effect, Layer, ServiceMap } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ServerConfig } from "./config";
+import { profileTokenActivityCtes } from "./profileTokenActivity";
 
 const HEATMAP_WINDOW_DAYS = 274; // ~9 months, GitHub-style contribution grid.
 const SKILL_RESULT_LIMIT = 12;
@@ -81,6 +82,7 @@ interface MostWorkedProjectRow {
 }
 
 interface TokenDayRow {
+  readonly estimated: number;
   readonly day: string | null;
   readonly provider: string | null;
   readonly model: string | null;
@@ -582,39 +584,6 @@ function buildMostWorkedProject(row: MostWorkedProjectRow | undefined): MostWork
 
 // ── Shared SQL ─────────────────────────────────────────────────────────
 
-// Maps every turn to the provider/model selected when it was started: turn-start
-// events carry the pending messageId, which projection_turns links back to the
-// turn_id that token activities reference. Shared by the live token stats query
-// and the delete-time archive snapshot so both attribute token deltas the same
-// way. Pass `scope` to restrict the CTE to a single thread (archive path).
-export function turnModelSelectionCte(
-  sql: SqlClient.SqlClient,
-  scope?: { readonly threadId: string },
-) {
-  const turnThreadMatch = scope
-    ? sql`${scope.threadId}`
-    : sql.literal("json_extract(e.payload_json, '$.threadId')");
-  const eventThreadScope = scope
-    ? sql`AND COALESCE(json_extract(e.payload_json, '$.threadId'), e.stream_id) = ${scope.threadId}`
-    : sql.literal("");
-  return sql`
-    SELECT
-      pt.thread_id AS thread_id,
-      pt.turn_id AS turn_id,
-      MAX(json_extract(e.payload_json, '$.modelSelection.provider')) AS provider,
-      MAX(json_extract(e.payload_json, '$.modelSelection.model')) AS model
-    FROM orchestration_events e
-    JOIN projection_turns pt
-      ON pt.thread_id = ${turnThreadMatch}
-     AND pt.pending_message_id = json_extract(e.payload_json, '$.messageId')
-    WHERE e.event_type = 'thread.turn-start-requested'
-      ${eventThreadScope}
-      AND pt.turn_id IS NOT NULL
-      AND json_type(e.payload_json, '$.modelSelection') = 'object'
-    GROUP BY pt.thread_id, pt.turn_id
-  `;
-}
-
 // ── Service ────────────────────────────────────────────────────────────
 
 export interface ProfileStatsQueryShape {
@@ -696,204 +665,23 @@ const makeProfileStatsQuery = Effect.gen(function* () {
       `,
     );
 
-  // Token usage for EVERY provider, straight from Synara's own DB (no external
-  // ~/.codex/~/.claude archives, so it is provider-agnostic AND per-instance). Each
-  // `context-window.updated` activity carries a running per-thread token counter;
-  // the positive delta is the tokens processed in that step, bucketed by the
-  // caller's local day. Deltas are attributed to the provider/model selected for
-  // the turn that processed them (activity turn_id → turn's pending message →
-  // turn-start modelSelection); the thread's current selection is only a fallback
-  // for legacy rows, so switching models mid-thread keeps history accurate.
-  // Counter scale: totalProcessedTokens is the preferred cumulative counter.
-  // Some provider/model groups only emit usedTokens; keep those as separate
-  // fallback series so a mixed-provider thread does not drop their tokens.
+  // Consumption accounting and legacy estimates share one SQL implementation
+  // with delete-time snapshots. Aggregate inside SQLite before returning rows;
+  // only day/provider/model totals cross into the server process.
   const queryTokenActivity = (tz: string) =>
     legacyCompatibleQuery(
       "profileStats.tokenActivity",
       sql<TokenDayRow>`
-        WITH turn_model AS (
-          ${turnModelSelectionCte(sql)}
-        ),
-        ev AS (
-          SELECT
-            a.thread_id AS thread_id,
-            STRFTIME('%Y-%m-%d', DATETIME(a.created_at, ${tz})) AS day,
-            COALESCE(
-              tm.provider,
-              json_extract(a.payload_json, '$.provider'),
-              CASE
-                WHEN th.model_selection_json IS NOT NULL AND json_valid(th.model_selection_json)
-                THEN json_extract(th.model_selection_json, '$.provider')
-              END,
-              'unknown'
-            ) AS provider,
-            COALESCE(
-              tm.model,
-              CASE
-                WHEN th.model_selection_json IS NOT NULL
-                  AND json_valid(th.model_selection_json)
-                  AND (
-                    json_extract(a.payload_json, '$.provider') IS NULL
-                    OR json_extract(a.payload_json, '$.provider') =
-                      json_extract(th.model_selection_json, '$.provider')
-                  )
-                THEN json_extract(th.model_selection_json, '$.model')
-              END,
-              'unknown'
-            ) AS model,
-            CAST(json_extract(a.payload_json, '$.totalProcessedTokens') AS INTEGER) AS tp,
-            CAST(json_extract(a.payload_json, '$.usedTokens') AS INTEGER) AS ut,
-            pm.dispatch_origin AS dispatch_origin,
-            a.sequence AS sequence,
-            a.created_at AS created_at,
-            a.activity_id AS activity_id
-          FROM projection_thread_activities a
-          JOIN projection_threads th ON th.thread_id = a.thread_id
-          LEFT JOIN turn_model tm
-            ON tm.thread_id = a.thread_id
-           AND tm.turn_id = a.turn_id
-          LEFT JOIN projection_turns pt
-            ON pt.thread_id = a.thread_id
-           AND pt.turn_id = a.turn_id
-          LEFT JOIN projection_thread_messages pm
-            ON pm.thread_id = pt.thread_id
-           AND pm.message_id = pt.pending_message_id
-          WHERE a.kind = 'context-window.updated'
-            AND COALESCE(
-              json_extract(a.payload_json, '$.totalProcessedTokens'),
-              json_extract(a.payload_json, '$.usedTokens')
-            ) IS NOT NULL
-        ),
-        provider_model_scale AS (
-          SELECT thread_id, provider, model, MAX(tp IS NOT NULL) AS has_cumulative
-          FROM ev
-          GROUP BY thread_id, provider, model
-        ),
-        cumulative_kept AS (
-          SELECT
-            day,
-            provider,
-            model,
-            thread_id,
-            tp AS tot,
-            dispatch_origin,
-            sequence,
-            created_at,
-            activity_id
-          FROM ev
-          WHERE tp IS NOT NULL
-        ),
-        cumulative_delta AS (
-          SELECT
-            day,
-            provider,
-            model,
-            dispatch_origin,
-            CASE
-              WHEN previous_tot IS NULL OR tot < previous_tot THEN tot
-              ELSE MAX(0, tot - previous_tot)
-            END AS d
-          FROM (
-            SELECT
-              day,
-              provider,
-              model,
-              dispatch_origin,
-              tot,
-              LAG(tot) OVER (
-                PARTITION BY thread_id
-                ORDER BY
-                  CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,
-                  sequence ASC,
-                  created_at ASC,
-                  activity_id ASC
-              ) AS previous_tot
-            FROM cumulative_kept
-          )
-        ),
-        used_only_kept AS (
-          SELECT
-            ev.day AS day,
-            ev.provider AS provider,
-            ev.model AS model,
-            ev.thread_id AS thread_id,
-            ev.ut AS tot,
-            ev.dispatch_origin AS dispatch_origin,
-            ev.sequence AS sequence,
-            ev.created_at AS created_at,
-            ev.activity_id AS activity_id
-          FROM ev
-          JOIN provider_model_scale pms
-            ON pms.thread_id = ev.thread_id
-           AND pms.provider = ev.provider
-           AND pms.model = ev.model
-          WHERE ev.tp IS NULL
-            AND ev.ut IS NOT NULL
-            AND NOT pms.has_cumulative
-        ),
-        used_only_delta AS (
-          SELECT
-            day,
-            provider,
-            model,
-            dispatch_origin,
-            CASE
-              WHEN previous_tot IS NULL THEN tot
-              WHEN tot < previous_tot
-                AND (provider != previous_provider OR model != previous_model)
-              THEN tot
-              ELSE MAX(0, tot - previous_tot)
-            END AS d
-          FROM (
-            SELECT
-              day,
-              provider,
-              model,
-              dispatch_origin,
-              tot,
-              LAG(tot) OVER (
-                PARTITION BY thread_id
-                ORDER BY
-                  CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,
-                  sequence ASC,
-                  created_at ASC,
-                  activity_id ASC
-              ) AS previous_tot,
-              LAG(provider) OVER (
-                PARTITION BY thread_id
-                ORDER BY
-                  CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,
-                  sequence ASC,
-                  created_at ASC,
-                  activity_id ASC
-              ) AS previous_provider,
-              LAG(model) OVER (
-                PARTITION BY thread_id
-                ORDER BY
-                  CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,
-                  sequence ASC,
-                  created_at ASC,
-                  activity_id ASC
-              ) AS previous_model
-            FROM used_only_kept
-          )
-        ),
+        ${profileTokenActivityCtes(sql)},
         all_tokens AS (
-          SELECT day, provider, model, d FROM cumulative_delta
-          WHERE dispatch_origin IS NULL OR dispatch_origin = 'user'
+          SELECT created_at, provider, model, tokens, estimated FROM live_tokens
           UNION ALL
-          SELECT day, provider, model, d FROM used_only_delta
-          WHERE dispatch_origin IS NULL OR dispatch_origin = 'user'
-          UNION ALL
-          SELECT
-            STRFTIME('%Y-%m-%d', DATETIME(a.created_at, ${tz})) AS day,
-            COALESCE(a.provider, 'unknown') AS provider,
-            COALESCE(a.model, 'unknown') AS model,
-            a.tokens AS d
-          FROM profile_stats_deleted_tokens a
+          SELECT created_at, COALESCE(provider, 'unknown'), COALESCE(model, 'unknown'), tokens, estimated
+          FROM profile_stats_deleted_tokens
         )
-        SELECT day, provider, model, SUM(d) AS tokens
-        FROM all_tokens
+        SELECT STRFTIME('%Y-%m-%d', DATETIME(created_at, ${tz})) AS day,
+          provider, model, SUM(tokens) AS tokens, MAX(estimated) AS estimated
+        FROM all_tokens WHERE tokens > 0
         GROUP BY day, provider, model
       `,
     );
@@ -1341,6 +1129,15 @@ const makeProfileStatsQuery = Effect.gen(function* () {
         peakDay,
         providers,
         unavailableProviders,
+        estimatedProviders: [
+          ...new Set(
+            rows
+              .filter((row) => row.estimated && row.tokens > 0)
+              .map((row) => normalizeProviderKind(row.provider)),
+          ),
+        ]
+          .filter((provider): provider is ProviderKind => provider !== "unknown")
+          .toSorted(),
         topProvider,
         topProviderPercent,
         models,

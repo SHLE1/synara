@@ -21,6 +21,7 @@ import {
   selectProfileHeatmap,
   selectProfileModelUsage,
   selectProfileTopProvider,
+  selectProfileTokenCoverage,
 } from "../profile/profileSelectors";
 import { ShareDialog } from "../profile/ShareDialog";
 import { EditProfileDialog } from "../profile/EditProfileDialog";
@@ -83,8 +84,9 @@ function ProfileContent({
 
   // Tokens/day when available, prompts/day otherwise — shared with ShareCard.
   const heatmap = selectProfileHeatmap(stats, tokenStats);
-  const topProvider = selectProfileTopProvider(stats, tokenStats);
-  const modelUsage = selectProfileModelUsage(stats, tokenStats);
+  const topProvider = selectProfileTopProvider(stats);
+  const modelUsage = selectProfileModelUsage(stats);
+  const tokenCoverage = selectProfileTokenCoverage(tokenStats);
   const peakHourLabel = formatPeakHourLabel(stats.activeHours.startHour);
   const mostWorkedProjectLabel = formatMostWorkedProjectLabel(stats.mostWorkedProject);
 
@@ -126,7 +128,7 @@ function ProfileContent({
       {/* Stat tiles */}
       <div className="grid grid-cols-2 divide-x divide-y divide-border/50 overflow-hidden rounded-2xl border border-border/60 sm:grid-cols-3 lg:grid-cols-5 lg:divide-y-0">
         <StatTile
-          label="Lifetime tokens"
+          label="Recorded tokens"
           value={tokensPending ? null : formatCompact(tokenStats?.lifetimeTotalTokens ?? null)}
         />
         <StatTile
@@ -140,7 +142,11 @@ function ProfileContent({
 
       {/* Heatmap */}
       <section className="flex min-w-0 flex-col gap-3">
-        <h3 className="text-sm font-medium">Activity</h3>
+        <h3 className="text-sm font-medium">Activity · {heatmap.unit}</h3>
+        <p className="text-xs text-muted-foreground">
+          Token totals cover recorded data only. Earlier turns may be missing.
+        </p>
+        {tokenCoverage ? <p className="text-xs text-muted-foreground">{tokenCoverage}</p> : null}
         {tokensPending ? (
           <Skeleton className="h-28 w-full rounded-lg" />
         ) : (
@@ -163,7 +169,7 @@ function ProfileContent({
           <h3 className="text-sm font-medium">Activity insights</h3>
           <dl className="flex flex-col gap-2.5">
             <InsightRow
-              label="Most used provider"
+              label="Most used provider · turns"
               value={
                 topProvider.provider
                   ? `${formatProviderLabel(topProvider.provider)}${
@@ -230,7 +236,7 @@ function ProfileContent({
 
       {/* Model usage */}
       <section className="flex flex-col gap-3">
-        <h3 className="text-sm font-medium">Model usage</h3>
+        <h3 className="text-sm font-medium">Model usage · turns</h3>
         {modelUsage.entries.length > 0 ? (
           <ul className="grid grid-cols-1 gap-x-12 gap-y-3 sm:grid-cols-2">
             {modelUsage.entries.slice(0, 6).map((entry) => (

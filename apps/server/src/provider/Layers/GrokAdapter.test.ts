@@ -3,9 +3,14 @@
 // Layer: Provider adapter tests
 // Depends on: GrokAdapter helper exports and shared contract ids.
 
-import { TurnId } from "@synara/contracts";
-import { Schema } from "effect";
-import { describe, expect, it } from "vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { ThreadId, TurnId, type ProviderRuntimeEvent } from "@synara/contracts";
+import { Deferred, Effect, Fiber, Layer, Schema, Stream } from "effect";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ServerConfig } from "../../config.ts";
+import { makeLifecycleAcpRuntime } from "../acp/AcpRuntimeTestFixture.ts";
+import * as GrokAcpSupport from "../acp/GrokAcpSupport.ts";
+import { GrokAdapter } from "../Services/GrokAdapter.ts";
 import { SYNARA_HARNESS_POLICY_MARKER } from "../../agentGateway/harnessPolicy.ts";
 import {
   extractGrokUserInputQuestions,
@@ -26,6 +31,7 @@ import {
   isGrokContextCompactionToolCall,
   isRenderableGrokAssistantDelta,
   mergeGrokModelDescriptors,
+  makeGrokAdapterLive,
   parseXaiLanguageModelDescriptors,
   selectGrokDiscoveredModelGroups,
   resolveGrokPlanHookResponse,
@@ -408,4 +414,95 @@ describe("GrokAdapter runtime event scoping", () => {
       },
     ]);
   });
+});
+
+describe("Grok adapter response consumption", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each(["end_turn", "cancelled"] as const)(
+    "emits real response usage before %s completion without text events",
+    async (stopReason) => {
+      const runtime = makeLifecycleAcpRuntime(
+        () =>
+          Effect.succeed({
+            stopReason,
+            _meta: {
+              sessionId: "grok-test-session",
+              requestId: "2bc95317-9855-4ff4-a712-e540100a745d",
+              promptId: "2bc95317-9855-4ff4-a712-e540100a745d",
+              totalTokens: 28262,
+              usage: {
+                inputTokens: 28238,
+                outputTokens: 24,
+                totalTokens: 28262,
+                cachedReadTokens: 0,
+                reasoningTokens: 19,
+                modelCalls: 1,
+                numTurns: 1,
+              },
+            },
+          }),
+        { sessionId: "grok-test-session", mode: "default" },
+      );
+      vi.spyOn(GrokAcpSupport, "makeGrokAcpRuntime").mockImplementation(() =>
+        Effect.succeed(runtime),
+      );
+      const layer = makeGrokAdapterLive().pipe(
+        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "grok-usage-test-" })),
+        Layer.provideMerge(NodeServices.layer),
+      );
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const adapter = yield* GrokAdapter;
+          const threadId = ThreadId.makeUnsafe("grok-usage-thread");
+          yield* adapter.startSession({
+            provider: "grok",
+            threadId,
+            runtimeMode: "full-access",
+            cwd: process.cwd(),
+          });
+          const completed = yield* Deferred.make<void>();
+          const events: ProviderRuntimeEvent[] = [];
+          const consumer = yield* adapter.streamEvents.pipe(
+            Stream.runForEach((event) =>
+              Effect.gen(function* () {
+                events.push(event);
+                if (event.type === "turn.completed") {
+                  yield* Deferred.succeed(completed, undefined);
+                }
+              }),
+            ),
+            Effect.forkChild,
+          );
+          yield* Effect.yieldNow;
+          const turn = yield* adapter.sendTurn({ threadId, input: "Reply OK", attachments: [] });
+          yield* Deferred.await(completed);
+          const consumption = events.filter((event) => event.type === "thread.usage.updated");
+          expect(consumption).toHaveLength(1);
+          expect(consumption[0]).toMatchObject({
+            threadId,
+            turnId: turn.turnId,
+            provider: "grok",
+            payload: {
+              scope: "turn",
+              sessionId: "grok-test-session",
+              sourceId: "2bc95317-9855-4ff4-a712-e540100a745d",
+              usage: {
+                inputTokens: 28238,
+                outputTokens: 24,
+                totalTokens: 28262,
+                cachedInputTokens: 0,
+                reasoningOutputTokens: 19,
+              },
+            },
+          });
+          expect(events.some((event) => event.type === "thread.token-usage.updated")).toBe(false);
+          expect(events.indexOf(consumption[0]!)).toBeLessThan(
+            events.findIndex((event) => event.type === "turn.completed"),
+          );
+          yield* Fiber.interrupt(consumer);
+        }).pipe(Effect.provide(layer), Effect.scoped),
+      );
+    },
+  );
 });

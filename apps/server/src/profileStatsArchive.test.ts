@@ -23,7 +23,6 @@ import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite";
 import { PROVIDER_COMMAND_REACTOR_CONSUMER } from "./persistence/Services/OrchestrationEventDeliveries";
 import { ProfileStatsQuery, ProfileStatsQueryLive } from "./profileStats";
 import {
-  aggregateThreadTokenRows,
   ProfileStatsArchive,
   ProfileStatsArchiveLive,
 } from "./profileStatsArchive";
@@ -270,129 +269,110 @@ describe("ProfileStatsArchive", () => {
     deleteCheckpointRefsImpl = (input) => Effect.sync(() => recordDeletedCheckpointRefs(input));
   });
 
-  it("archives usedTokens-only model groups even when another group has cumulative telemetry", () => {
-    const rows = aggregateThreadTokenRows([
-      {
-        totalProcessedTokens: 2000,
-        usedTokens: 1200,
-        provider: "codex",
-        model: "gpt-5-codex",
-        createdAt: "2026-06-13T12:02:00.000Z",
-      },
-      {
-        totalProcessedTokens: null,
-        usedTokens: 300,
-        provider: "codex",
-        model: "gpt-5-codex",
-        createdAt: "2026-06-13T12:03:00.000Z",
-      },
-      {
-        totalProcessedTokens: 2500,
-        usedTokens: 1500,
-        provider: "codex",
-        model: "gpt-5-codex",
-        createdAt: "2026-06-13T12:04:00.000Z",
-      },
-      {
-        totalProcessedTokens: null,
-        usedTokens: 700,
-        provider: "claudeAgent",
-        model: "claude-haiku-4-5",
-        createdAt: "2026-06-13T12:11:00.000Z",
-      },
-      {
-        totalProcessedTokens: null,
-        usedTokens: 1700,
-        provider: "claudeAgent",
-        model: "claude-haiku-4-5",
-        createdAt: "2026-06-13T12:12:00.000Z",
-      },
-    ]);
+  it.each(["totalProcessedTokens", "usedTokens"])(
+    "keeps historical %s estimates without counting sparse intervals after explicit usage starts",
+    async (counter) => {
+      await runArchiveTest(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const stats = yield* ProfileStatsQuery;
+          const archive = yield* ProfileStatsArchive;
+          yield* seedTwoThreadsWithActivity;
+          yield* sql`DELETE FROM projection_thread_activities WHERE thread_id = 'thread-purge'`;
+          const payloads = [
+            { provider: "codex", [counter]: 100 },
+            { provider: "codex", usage: { totalTokens: 100 }, scope: "turn", sessionId: "sparse", sourceId: "prompt" },
+            // No window event exists for the explicit turn. This cumulative
+            // interval includes its spend and cannot safely be added again.
+            { provider: "codex", [counter]: 300 },
+          ];
+          for (const [index, payload] of payloads.entries()) {
+            yield* sql`
+              INSERT INTO projection_thread_activities (
+                activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+              ) VALUES (
+                ${`sparse-${index}`}, 'thread-purge', ${`sparse-turn-${index}`}, 'info',
+                ${index === 1 ? "token-usage.updated" : "context-window.updated"}, 'usage',
+                ${JSON.stringify(payload)}, ${index + 1}, ${`2026-06-14T10:0${index}:00.000Z`}
+              )
+            `;
+          }
+          const before = yield* stats.getProfileTokenStats({ utcOffsetMinutes: 480 });
+          // 1000 from the other thread, 100 historical estimate, 100 explicit.
+          // The final interval has no independent spend record; do not invent it.
+          expect(before.lifetimeTotalTokens).toBe(1200);
+          expect(before.estimatedProviders).toEqual(["claudeAgent", "codex"]);
+          yield* acknowledgeProviderCommandJournal(sql);
+          expect(yield* archive.purgeThreadWithStatsSnapshot({ threadId: "thread-purge" })).toBe(true);
+          expect(yield* stats.getProfileTokenStats({ utcOffsetMinutes: 480 })).toEqual(before);
+        }),
+      );
+    },
+  );
 
-    expect(rows).toEqual([
-      {
-        createdAt: "2026-06-13T12:02:00.000Z",
-        provider: "codex",
-        model: "gpt-5-codex",
-        tokens: 2000,
-      },
-      {
-        createdAt: "2026-06-13T12:04:00.000Z",
-        provider: "codex",
-        model: "gpt-5-codex",
-        tokens: 500,
-      },
-      {
-        createdAt: "2026-06-13T12:11:00.000Z",
-        provider: "claudeAgent",
-        model: "claude-haiku-4-5",
-        tokens: 700,
-      },
-      {
-        createdAt: "2026-06-13T12:12:00.000Z",
-        provider: "claudeAgent",
-        model: "claude-haiku-4-5",
-        tokens: 1000,
-      },
-    ]);
-  });
-
-  it("computes cumulative deltas across agent turns before excluding their usage", () => {
-    const rows = aggregateThreadTokenRows([
-      {
-        totalProcessedTokens: 1_000,
-        usedTokens: null,
-        provider: "codex",
-        model: "gpt-5.5",
-        dispatchOrigin: "user",
-        createdAt: "2026-06-13T12:00:00.000Z",
-      },
-      {
-        totalProcessedTokens: 2_500,
-        usedTokens: null,
-        provider: "codex",
-        model: "gpt-5.5",
-        dispatchOrigin: "agent",
-        createdAt: "2026-06-13T12:01:00.000Z",
-      },
-      {
-        totalProcessedTokens: 3_000,
-        usedTokens: null,
-        provider: "codex",
-        model: "gpt-5.5",
-        dispatchOrigin: "user",
-        createdAt: "2026-06-13T12:02:00.000Z",
-      },
-    ]);
-
-    expect(rows.map(({ createdAt, tokens }) => ({ createdAt, tokens }))).toEqual([
-      { createdAt: "2026-06-13T12:00:00.000Z", tokens: 1_000 },
-      { createdAt: "2026-06-13T12:02:00.000Z", tokens: 500 },
-    ]);
-  });
-
-  it("keeps a stamped activity provider instead of a mismatched thread fallback", () => {
-    const rows = aggregateThreadTokenRows(
-      [
-        {
-          totalProcessedTokens: 1_500,
-          usedTokens: null,
-          provider: "claudeAgent",
-          model: null,
-          createdAt: "2026-06-13T12:00:00.000Z",
-        },
-      ],
-      { provider: "codex", model: "gpt-5.5" },
+  it("deduplicates explicit consumption, scopes cumulative sessions, and preserves totals through purge", async () => {
+    await runArchiveTest(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const stats = yield* ProfileStatsQuery;
+        const archive = yield* ProfileStatsArchive;
+        yield* seedTwoThreadsWithActivity;
+        // Keep the other thread's historical estimate, replace this thread's
+        // telemetry with a mix of legacy and independent consumption events.
+        yield* sql`DELETE FROM projection_thread_activities WHERE thread_id = 'thread-purge'`;
+        const entries = [
+          { turn: "legacy", provider: "grok", model: "old", legacy: 50 },
+          { turn: "a", provider: "grok", model: "grok-a", total: 100, session: "s1", source: "p1" },
+          { turn: "a", provider: "grok", model: "grok-a", legacy: 900 },
+          { turn: "b", provider: "grok", model: "grok-b", total: 40, session: "s1", source: "p2" },
+          // A replay associated with a new Synara turn must not count again.
+          { turn: "replay", provider: "grok", model: "grok-b", total: 100, session: "s1", source: "p1" },
+          { turn: "c", provider: "pi", model: "pi-model", total: 200, session: "s1", source: "p3", scope: "session" },
+          { turn: "d", provider: "pi", model: "pi-model", total: 260, session: "s1", source: "p4", scope: "session" },
+          { turn: "e", provider: "pi", model: "pi-model", total: 30, session: "s2", source: "p5", scope: "session" },
+          // Counter reset within a session starts a new cumulative baseline.
+          { turn: "f", provider: "pi", model: "pi-model", total: 10, session: "s2", source: "p6", scope: "session" },
+          { turn: "g", provider: "grok", model: "grok-b", total: 20, session: "s2", source: "p7", scope: "session" },
+          { turn: "h", provider: "grok", model: "grok-b", total: 25, session: "s2", source: "p8", scope: "session" },
+        ];
+        const knownTurns = new Set<string>();
+        for (const [index, entry] of entries.entries()) {
+          const turn = `consumption-${entry.turn}`;
+          const timestamp = `2026-06-14T10:${String(index).padStart(2, "0")}:00.000Z`;
+          if (!knownTurns.has(turn)) {
+            knownTurns.add(turn);
+            yield* sql`
+              INSERT INTO projection_turns (thread_id, turn_id, pending_message_id, state, requested_at, checkpoint_files_json)
+              VALUES ('thread-purge', ${turn}, ${turn}, 'completed', ${timestamp}, '[]')
+            `;
+            yield* sql`
+              INSERT INTO orchestration_events (event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at, actor_kind, payload_json, metadata_json)
+              VALUES (${turn}, 'thread', 'thread-purge', ${100 + index}, 'thread.turn-start-requested', ${timestamp}, 'client',
+                ${JSON.stringify({ threadId: "thread-purge", messageId: turn, modelSelection: { provider: entry.provider, model: entry.model } })}, '{}')
+            `;
+          }
+          const payload = entry.legacy === undefined
+            ? { provider: entry.provider, usage: { totalTokens: entry.total }, sessionId: entry.session, sourceId: entry.source, scope: entry.scope ?? "turn" }
+            : { provider: entry.provider, usedTokens: entry.legacy };
+          yield* sql`
+            INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+            VALUES (${`consumption-${index}`}, 'thread-purge', ${turn}, 'info',
+              ${entry.legacy === undefined ? "token-usage.updated" : "context-window.updated"}, 'usage', ${JSON.stringify(payload)}, ${100 + index}, ${timestamp})
+          `;
+        }
+        const before = yield* stats.getProfileTokenStats({ utcOffsetMinutes: 480 });
+        expect(before.lifetimeTotalTokens).toBe(1515); // 1000 historical + 50 estimated + 465 explicit.
+        expect(before.models).toEqual(expect.arrayContaining([
+          expect.objectContaining({ provider: "grok", model: "grok-a", tokens: 100 }),
+          expect.objectContaining({ provider: "grok", model: "grok-b", tokens: 65 }),
+          expect.objectContaining({ provider: "pi", model: "pi-model", tokens: 300 }),
+        ]));
+        expect(before.estimatedProviders).toEqual(["claudeAgent", "grok"]);
+        yield* acknowledgeProviderCommandJournal(sql);
+        expect(yield* archive.purgeThreadWithStatsSnapshot({ threadId: "thread-purge" })).toBe(true);
+        expect(yield* stats.getProfileTokenStats({ utcOffsetMinutes: 480 })).toEqual(before);
+      }),
     );
-
-    expect(rows).toEqual([
-      {
-        createdAt: "2026-06-13T12:00:00.000Z",
-        provider: "claudeAgent",
-        model: null,
-        tokens: 1_500,
-      },
-    ]);
   });
 
   it("purges a thread's rows while keeping every profile stat unchanged", async () => {

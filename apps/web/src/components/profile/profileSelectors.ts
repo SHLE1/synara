@@ -9,6 +9,7 @@ import type {
   ProfileTokenStats,
   ProviderKind,
 } from "@synara/contracts";
+import { PROVIDER_DISPLAY_NAMES } from "@synara/contracts";
 
 export interface ProfileHeatmapSelection {
   readonly cells: ReadonlyArray<ProfileHeatmapCell>;
@@ -19,7 +20,7 @@ export interface ProfileHeatmapSelection {
 export interface ProfileTopProviderSelection {
   readonly provider: ProviderKind | null;
   readonly percent: number | null;
-  readonly metric: "tokens" | "turns";
+  readonly metric: "turns";
 }
 
 export interface ProfileModelUsageEntry {
@@ -30,7 +31,7 @@ export interface ProfileModelUsageEntry {
 
 export interface ProfileModelUsageSelection {
   readonly entries: ReadonlyArray<ProfileModelUsageEntry>;
-  readonly metric: "tokens" | "turns";
+  readonly metric: "turns";
 }
 
 // Prefer tokens/day when available; fall back to prompt counts while token stats load.
@@ -44,19 +45,8 @@ export function selectProfileHeatmap(
   return { cells: stats.activity.heatmap, unit: "prompts" };
 }
 
-// Prefer token-based provider usage when telemetry is available; fall back to turn count.
-export function selectProfileTopProvider(
-  stats: ProfileStats,
-  tokenStats: ProfileTokenStats | null,
-): ProfileTopProviderSelection {
-  if (tokenStats?.available && tokenStats.topProvider) {
-    return {
-      provider: tokenStats.topProvider,
-      percent: tokenStats.topProviderPercent,
-      metric: "tokens",
-    };
-  }
-
+// Rank by turns so missing telemetry never excludes a provider from usage rankings.
+export function selectProfileTopProvider(stats: ProfileStats): ProfileTopProviderSelection {
   return {
     provider: stats.insights.topProvider,
     percent: stats.insights.topProviderPercent,
@@ -64,15 +54,21 @@ export function selectProfileTopProvider(
   };
 }
 
-// Prefer the token-based model mix (tokens are attributed to the model each turn
-// actually ran with) and fall back to turn counts while token stats load or when
-// no provider emitted token telemetry.
-export function selectProfileModelUsage(
-  stats: ProfileStats,
-  tokenStats: ProfileTokenStats | null,
-): ProfileModelUsageSelection {
-  if (tokenStats?.available && tokenStats.models.length > 0) {
-    return { entries: tokenStats.models, metric: "tokens" };
-  }
+// Keep the same turn-based denominator before and after token telemetry loads.
+export function selectProfileModelUsage(stats: ProfileStats): ProfileModelUsageSelection {
   return { entries: stats.providerModels, metric: "turns" };
+}
+
+export function selectProfileTokenCoverage(tokenStats: ProfileTokenStats | null): string | null {
+  if (!tokenStats) return null;
+  const notes: string[] = [];
+  if (tokenStats.unavailableProviders.length > 0) {
+    const names = tokenStats.unavailableProviders.map((provider) => PROVIDER_DISPLAY_NAMES[provider]);
+    notes.push(`No token data recorded for ${names.join(", ")}.`);
+  }
+  if (tokenStats.estimatedProviders && tokenStats.estimatedProviders.length > 0) {
+    const names = tokenStats.estimatedProviders.map((provider) => PROVIDER_DISPLAY_NAMES[provider]);
+    notes.push(`Includes historical estimates for ${names.join(", ")}.`);
+  }
+  return notes.length > 0 ? notes.join(" ") : null;
 }

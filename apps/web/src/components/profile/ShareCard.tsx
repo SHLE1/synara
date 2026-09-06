@@ -44,7 +44,7 @@ export const ShareCard = forwardRef<HTMLDivElement, ShareCardProps>(function Sha
   { stats, tokenStats, displayName, handle, avatarColor, avatarImage },
   ref,
 ) {
-  const topProvider = selectProfileTopProvider(stats, tokenStats);
+  const topProvider = selectProfileTopProvider(stats);
 
   const tiles: Tile[] = [
     {
@@ -54,7 +54,7 @@ export const ShareCard = forwardRef<HTMLDivElement, ShareCardProps>(function Sha
           {formatCompact(tokenStats?.lifetimeTotalTokens ?? null)}
         </span>
       ),
-      label: "lifetime tokens",
+      label: "recorded tokens*",
     },
     {
       key: "peak",
@@ -75,7 +75,7 @@ export const ShareCard = forwardRef<HTMLDivElement, ShareCardProps>(function Sha
     },
     {
       key: "provider",
-      // Most-used provider: token telemetry when available, otherwise turn count. An explicit
+      // Most-used provider by turns. An explicit
       // slate color keeps currentColor glyphs visible on the white card in every theme.
       value: topProvider.provider ? (
         <span className="flex items-center gap-2">
@@ -90,7 +90,7 @@ export const ShareCard = forwardRef<HTMLDivElement, ShareCardProps>(function Sha
       ) : (
         <span className={VALUE_CLASS}>—</span>
       ),
-      label: "top provider",
+      label: "top provider · turns",
     },
   ];
 
@@ -144,6 +144,9 @@ export const ShareCard = forwardRef<HTMLDivElement, ShareCardProps>(function Sha
           </div>
         ))}
       </div>
+      <p className="text-[10px] leading-tight text-slate-400">
+        *Recorded token data may be incomplete and include historical estimates.
+      </p>
     </div>
   );
 });

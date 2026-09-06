@@ -10,6 +10,7 @@ import {
   selectProfileHeatmap,
   selectProfileModelUsage,
   selectProfileTopProvider,
+  selectProfileTokenCoverage,
 } from "./profileSelectors";
 
 const promptHeatmapCell = {
@@ -83,24 +84,46 @@ const tokenStats = {
 } satisfies ProfileTokenStats;
 
 describe("profile selectors", () => {
-  it("prefers token telemetry once available", () => {
-    expect(selectProfileTopProvider(baseStats, tokenStats)).toEqual({
-      provider: "claudeAgent",
-      percent: 83.3,
-      metric: "tokens",
+  it("keeps Grok in model usage without token telemetry and explains coverage", () => {
+    const stats = {
+      ...baseStats,
+      providerModels: [
+        { provider: "grok" as const, model: "grok-4.6", turnCount: 3, percent: 75 },
+        { provider: "pi" as const, model: "glm-5.3-flash", turnCount: 1, percent: 25 },
+      ],
+      insights: { ...baseStats.insights, topProvider: "grok" as const, topProviderPercent: 75 },
+    };
+    expect(selectProfileModelUsage(stats).entries).toEqual(stats.providerModels);
+    expect(selectProfileTopProvider(stats)).toEqual({ provider: "grok", percent: 75, metric: "turns" });
+    expect(
+      selectProfileTokenCoverage({
+        ...tokenStats,
+        unavailableProviders: ["grok"],
+        estimatedProviders: ["pi"],
+      }),
+    ).toBe("No token data recorded for Grok. Includes historical estimates for Pi.");
+    expect(selectProfileTokenCoverage(tokenStats)).toBeNull();
+    expect(selectProfileTokenCoverage(null)).toBeNull();
+  });
+
+  it("uses token telemetry for activity but keeps usage rankings based on turns", () => {
+    expect(selectProfileTopProvider(baseStats)).toEqual({
+      provider: "codex",
+      percent: 66.7,
+      metric: "turns",
     });
     expect(selectProfileHeatmap(baseStats, tokenStats)).toEqual({
       cells: [tokenHeatmapCell],
       unit: "tokens",
     });
-    expect(selectProfileModelUsage(baseStats, tokenStats)).toEqual({
-      entries: tokenStats.models,
-      metric: "tokens",
+    expect(selectProfileModelUsage(baseStats)).toEqual({
+      entries: baseStats.providerModels,
+      metric: "turns",
     });
   });
 
   it("falls back to core profile stats while token telemetry is unavailable", () => {
-    expect(selectProfileTopProvider(baseStats, null)).toEqual({
+    expect(selectProfileTopProvider(baseStats)).toEqual({
       provider: "codex",
       percent: 66.7,
       metric: "turns",
@@ -109,16 +132,10 @@ describe("profile selectors", () => {
       cells: [promptHeatmapCell],
       unit: "prompts",
     });
-    expect(selectProfileModelUsage(baseStats, null)).toEqual({
+    expect(selectProfileModelUsage(baseStats)).toEqual({
       entries: baseStats.providerModels,
       metric: "turns",
     });
   });
 
-  it("falls back to turn-based model usage when token telemetry has no model rows", () => {
-    expect(selectProfileModelUsage(baseStats, { ...tokenStats, models: [] })).toEqual({
-      entries: baseStats.providerModels,
-      metric: "turns",
-    });
-  });
 });

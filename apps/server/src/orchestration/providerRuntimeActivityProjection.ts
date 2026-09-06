@@ -941,6 +941,23 @@ export function projectProviderRuntimeActivities(
       ];
     }
 
+    case "thread.usage.updated": {
+      // Never project consumption into the context meter or transcript rows.
+      if (!event.turnId) return [];
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "info",
+          kind: "token-usage.updated",
+          summary: "Token consumption updated",
+          payload: toActivityPayload({ provider: event.provider, ...event.payload }),
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
     case "thread.token-usage.updated": {
       const payload = buildContextWindowActivityPayload(event);
       if (!payload) {

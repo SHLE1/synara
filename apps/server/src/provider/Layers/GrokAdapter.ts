@@ -124,6 +124,7 @@ import {
   makeGrokExitPlanModeCapturedResponse,
   makeGrokQuestionResponse,
 } from "../acp/GrokAcpExtension.ts";
+import { parseGrokPromptResponseConsumption } from "../acp/GrokAcpUsage.ts";
 import {
   applyGrokAcpModelSelection,
   getGrokApiKeyEnv,
@@ -354,6 +355,7 @@ interface GrokSessionContext {
   activeInteractionMode: ProviderInteractionMode | undefined;
   activeTurnId: TurnId | undefined;
   activeTurnHadAssistantContent: boolean;
+  readonly acpSessionId: string;
   readonly activeAssistantItemsWithContent: Set<string>;
   activePlanResponseText: string;
   activeTurnFailedToolDetail: string | undefined;
@@ -1312,6 +1314,7 @@ export function makeGrokAdapter(
             activeInteractionMode: undefined,
             activeTurnId: undefined,
             activeTurnHadAssistantContent: false,
+            acpSessionId: started.sessionId,
             activeAssistantItemsWithContent: new Set(),
             activePlanResponseText: "",
             activeTurnFailedToolDetail: undefined,
@@ -1930,6 +1933,17 @@ export function makeGrokAdapter(
                 yield* waitForGrokQueuedTurnEventsDrained(ctx);
                 if (ctx.activeTurnId !== turnId) {
                   return;
+                }
+                const consumption = parseGrokPromptResponseConsumption(result, ctx.acpSessionId);
+                if (consumption) {
+                  yield* offerRuntimeEvent(ctx.lifecycleGeneration, {
+                    type: "thread.usage.updated",
+                    ...(yield* makeEventStamp()),
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    turnId,
+                    payload: { ...consumption, scope: "turn", sessionId: ctx.acpSessionId },
+                  });
                 }
                 const hadAssistantContent = ctx.activeTurnHadAssistantContent;
                 const failedToolDetail = ctx.activeTurnFailedToolDetail;

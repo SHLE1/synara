@@ -586,6 +586,36 @@ describe("provider runtime activity projection", () => {
     expect(payload.data?.originalJsonChars).toBeGreaterThan(300_000);
   });
 
+  it("projects consumption separately from window occupancy and requires turn attribution", () => {
+    const event = runtimeEvent({
+      type: "thread.usage.updated",
+      eventId: "grok-consumption",
+      provider: "grok",
+      turnId: TURN_ID,
+      payload: {
+        usage: { totalTokens: 1234, inputTokens: 1200, outputTokens: 34 },
+        scope: "turn",
+        sessionId: "grok-session",
+        sourceId: "grok-prompt",
+      },
+    });
+    const activities = projectProviderRuntimeActivities(event);
+    expect(activities).toHaveLength(1);
+    expect(activities[0]).toMatchObject({
+      kind: "token-usage.updated",
+      turnId: TURN_ID,
+      payload: {
+        provider: "grok",
+        usage: { totalTokens: 1234 },
+        scope: "turn",
+        sessionId: "grok-session",
+        sourceId: "grok-prompt",
+      },
+    });
+    expect(() => decodeActivityAppendCommand(activities[0]!)).not.toThrow();
+    expect(projectProviderRuntimeActivities({ ...event, turnId: undefined })).toEqual([]);
+  });
+
   it("compacts context and per-model usage into stable activity payloads", () => {
     const [usage] = projectProviderRuntimeActivities(
       runtimeEvent({

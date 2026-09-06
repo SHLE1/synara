@@ -105,8 +105,7 @@ export const ProfileActiveHours = Schema.Struct({
 export type ProfileActiveHours = typeof ProfileActiveHours.Type;
 
 export const ProfileInsights = Schema.Struct({
-  // Ranked by turn count. Token-based ranking lives on ProfileTokenStats; clients
-  // prefer it when available (see selectProfileTopProvider on the web).
+  // Ranked by turn count, independently of token telemetry coverage.
   topProvider: Schema.NullOr(ProviderKind),
   topProviderPercent: Schema.NullOr(Schema.Number),
   topReasoning: Schema.NullOr(Schema.String),
@@ -149,7 +148,7 @@ export type ProfileStats = typeof ProfileStats.Type;
 export const StatsGetProfileStatsResult = ProfileStats;
 export type StatsGetProfileStatsResult = typeof StatsGetProfileStatsResult.Type;
 
-// Token totals come from Synara's projected context-window updates. `available`
+// Token totals come from consumption telemetry and legacy estimates. `available`
 // is false when the DB has not recorded token totals yet.
 export const ProfileTokenStats = Schema.Struct({
   available: Schema.Boolean,
@@ -157,14 +156,14 @@ export const ProfileTokenStats = Schema.Struct({
   peakDayTokens: Schema.NullOr(NonNegativeInt),
   peakDay: Schema.NullOr(TrimmedNonEmptyString),
   providers: Schema.Array(ProviderKind),
-  // Providers with recorded turns but no token telemetry (their adapters never
-  // emit context-window updates); excluded from token-based rankings.
+  // Providers with recorded turns but no recorded token data.
   unavailableProviders: Schema.Array(ProviderKind),
+  // Legacy window-derived estimates, including archives without source metadata.
+  estimatedProviders: Schema.optional(Schema.Array(ProviderKind)),
   // Most-used provider by tokens processed, among providers with token telemetry.
   topProvider: Schema.NullOr(ProviderKind),
   topProviderPercent: Schema.NullOr(Schema.Number),
-  // Per-model token shares; clients prefer this over the turn-based
-  // ProfileStats.providerModels when token telemetry is available.
+  // Per-model shares of recorded tokens; usage rankings use turn counts.
   models: Schema.Array(ProfileTokenModelUsage),
   heatmapMetric: Schema.Literal("tokens"),
   heatmap: Schema.Array(ProfileHeatmapCell),

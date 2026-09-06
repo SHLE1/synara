@@ -6,6 +6,36 @@ import { ProviderRuntimeEvent, type ProviderRuntimeEventType } from "./providerR
 const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
 
 describe("ProviderRuntimeEvent", () => {
+  it("decodes consumption independently of context and requires a replay identity", () => {
+    const event = {
+      type: "thread.usage.updated",
+      eventId: "grok-usage",
+      provider: "grok",
+      createdAt: "2026-09-06T10:00:00.000Z",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      payload: {
+        usage: { totalTokens: 120, inputTokens: 100, outputTokens: 20 },
+        scope: "turn",
+        sessionId: "grok-session",
+        sourceId: "grok-prompt",
+      },
+    };
+    expect(decodeRuntimeEvent(event)).toMatchObject(event);
+    expect(() =>
+      decodeRuntimeEvent({
+        ...event,
+        payload: { ...event.payload, sourceId: "" },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeRuntimeEvent({
+        ...event,
+        payload: { ...event.payload, usage: { totalTokens: -1 } },
+      }),
+    ).toThrow();
+  });
+
   it("includes turn.steered in the exported event type", () => {
     const eventType: ProviderRuntimeEventType = "turn.steered";
     expect(eventType).toBe("turn.steered");
