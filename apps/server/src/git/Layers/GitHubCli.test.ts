@@ -1160,6 +1160,47 @@ layer("GitHubCliLive", (it) => {
     );
   }
 
+  it.effect("does not synthesize profile links for GitHub App commit authors", () =>
+    Effect.gen(function* () {
+      mockedRunProcess.mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          number: 17,
+          title: "App-authored commit",
+          url: "https://github.com/acme/app/pull/17",
+          headRefName: "app-commit",
+          baseRefName: "main",
+          createdAt: "2026-07-01T00:00:00Z",
+          updatedAt: "2026-07-02T00:00:00Z",
+          commits: [
+            {
+              oid: "app123",
+              committedDate: "2026-07-01T00:00:00Z",
+              authors: [{ login: "app/dependabot", name: "dependabot[bot]" }],
+            },
+          ],
+        }),
+        stderr: "",
+        code: 0,
+        signal: null,
+        timedOut: false,
+      });
+      const gh = yield* GitHubCli;
+      const detail = yield* gh.getPullRequestDetail({
+        cwd: "/repo",
+        repository: "acme/app",
+        number: 17,
+      });
+      assert.deepStrictEqual(detail.commits[0]?.authors, [
+        {
+          login: "app/dependabot",
+          name: "dependabot[bot]",
+          avatarUrl: null,
+          url: null,
+        },
+      ]);
+    }),
+  );
+
   for (const invalidAuthor of [{ login: 123 }, { login: null, name: false }]) {
     it.effect(`rejects malformed commit author ${JSON.stringify(invalidAuthor)}`, () =>
       Effect.gen(function* () {
@@ -1196,7 +1237,7 @@ layer("GitHubCliLive", (it) => {
     );
   }
 
-  it.effect("normalizes nullable actors without losing comments or treating teams as users", () =>
+  it.effect("normalizes actors without losing comments or treating teams as users", () =>
     Effect.gen(function* () {
       mockedRunProcess.mockResolvedValueOnce({
         stdout: JSON.stringify({
@@ -1207,23 +1248,19 @@ layer("GitHubCliLive", (it) => {
           baseRefName: "main",
           createdAt: "2026-07-01T00:00:00Z",
           updatedAt: "2026-07-02T00:00:00Z",
-          author: { login: null, slug: null, name: "Local author" },
+          author: { login: "local-author", name: "Local author" },
           reviewRequests: [
             { login: " reviewer ", slug: "unused" },
-            { __typename: "Team", login: "", slug: " platform " },
-            { __typename: "Team", login: null, slug: "security" },
-            { __typename: "Team", login: " \t ", slug: "infra" },
-            { login: "", slug: "" },
-            { login: null, slug: null },
-            { login: " \t ", slug: " \t " },
-            {},
+            { __typename: "Team", slug: " platform " },
+            { __typename: "Team", slug: "security" },
+            { __typename: "Team", slug: "infra" },
           ],
           comments: [
             {
               id: "comment",
               body: "Keep this comment",
               createdAt: "2026-07-01T01:00:00Z",
-              author: { login: "", name: "Former user" },
+              author: { login: "former-user", name: "Former user" },
             },
           ],
           reviews: [
@@ -1232,7 +1269,7 @@ layer("GitHubCliLive", (it) => {
               body: "Keep this review",
               submittedAt: "2026-07-01T02:00:00Z",
               state: "APPROVED",
-              author: { login: " \t " },
+              author: { login: "reviewer" },
             },
           ],
         }),
@@ -1248,7 +1285,7 @@ layer("GitHubCliLive", (it) => {
         number: 9,
       });
 
-      assert.equal(detail.author, null);
+      assert.equal(detail.author?.login, "local-author");
       assert.deepStrictEqual(detail.reviewRequestLogins, ["reviewer"]);
       assert.deepStrictEqual(detail.reviewers, [
         {
@@ -1269,8 +1306,28 @@ layer("GitHubCliLive", (it) => {
           reviewState,
         })),
         [
-          { id: "comment", body: "Keep this comment", author: null, reviewState: null },
-          { id: "review", body: "Keep this review", author: null, reviewState: "APPROVED" },
+          {
+            id: "comment",
+            body: "Keep this comment",
+            author: {
+              login: "former-user",
+              name: "Former user",
+              avatarUrl: "https://avatars.githubusercontent.com/former-user?size=64",
+              url: null,
+            },
+            reviewState: null,
+          },
+          {
+            id: "review",
+            body: "Keep this review",
+            author: {
+              login: "reviewer",
+              name: null,
+              avatarUrl: "https://avatars.githubusercontent.com/reviewer?size=64",
+              url: null,
+            },
+            reviewState: "APPROVED",
+          },
         ],
       );
     }),

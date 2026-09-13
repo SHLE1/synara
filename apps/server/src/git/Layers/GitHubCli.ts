@@ -194,11 +194,19 @@ const RawPullRequestChecksSchema = Schema.Struct({
 
 const RawActorSchema = Schema.Struct({
   __typename: Schema.optional(Schema.NullOr(Schema.String)),
-  // `gh pr view --json` emits `login: ""` (and `id: ""`) for commit authors that
-  // have no GitHub account (e.g. a local `git config user.name` commit). These
-  // must decode as "no login" instead of failing the whole PR detail payload.
+  login: Schema.optional(TrimmedNonEmptyString),
+  slug: Schema.optional(TrimmedNonEmptyString),
+  name: Schema.optional(Schema.NullOr(Schema.String)),
+  avatarUrl: Schema.optional(Schema.NullOr(Schema.String)),
+  url: Schema.optional(Schema.NullOr(Schema.String)),
+});
+
+// Commit authors are the one GitHub actor shape that may be anonymous. `gh`
+// emits empty or null logins for commits authored with a local git identity;
+// keep that exception local to commits so PR users, reviewers, and comments
+// continue to reject malformed actor payloads.
+const RawCommitAuthorSchema = Schema.Struct({
   login: Schema.optional(Schema.NullOr(Schema.String)),
-  slug: Schema.optional(Schema.NullOr(Schema.String)),
   name: Schema.optional(Schema.NullOr(Schema.String)),
   avatarUrl: Schema.optional(Schema.NullOr(Schema.String)),
   url: Schema.optional(Schema.NullOr(Schema.String)),
@@ -233,7 +241,7 @@ const RawCommitSchema = Schema.Struct({
   messageHeadline: Schema.optional(Schema.NullOr(Schema.String)),
   messageBody: Schema.optional(Schema.NullOr(Schema.String)),
   committedDate: TrimmedNonEmptyString,
-  authors: Schema.optional(Schema.NullOr(Schema.Array(RawActorSchema))),
+  authors: Schema.optional(Schema.NullOr(Schema.Array(RawCommitAuthorSchema))),
 });
 
 const RawRepositoryMergeCapabilitiesSchema = Schema.Struct({
@@ -658,7 +666,7 @@ function normalizeActor(
 }
 
 function normalizeCommitAuthor(
-  raw: Schema.Schema.Type<typeof RawActorSchema>,
+  raw: Schema.Schema.Type<typeof RawCommitAuthorSchema>,
 ): PullRequestCommitAuthor | null {
   const login = raw.login?.trim() || null;
   const name = raw.name?.trim() || null;
@@ -667,7 +675,10 @@ function normalizeCommitAuthor(
     login,
     name,
     avatarUrl: login ? raw.avatarUrl?.trim() || githubAvatarUrlForLogin(login) : null,
-    url: login ? raw.url?.trim() || `https://github.com/${encodeURIComponent(login)}` : null,
+    url: login
+      ? raw.url?.trim() ||
+        (login.startsWith("app/") ? null : `https://github.com/${encodeURIComponent(login)}`)
+      : null,
   };
 }
 
@@ -701,6 +712,7 @@ function normalizePullRequestListItem(
     // Only User review requests have a login. A Team slug is not a viewer identity and
     // comparing it with the current user's login would create false-positive badges.
     reviewRequestLogins: (raw.reviewRequests ?? []).flatMap((actor) => {
+      if (actor.__typename === "Team") return [];
       const login = actor.login?.trim() || null;
       return login ? [login] : [];
     }),
