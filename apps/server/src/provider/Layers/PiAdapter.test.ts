@@ -46,27 +46,30 @@ describe("Pi tool titles", () => {
     { toolName: "bash", args: { command: " \t\n" }, title: "bash" },
     { toolName: " custom_tool \n", args: {}, title: "custom_tool" },
     { toolName: " \t", args: {}, title: "Tool" },
-  ])("encodes lifecycle titles for $toolName without changing arguments", ({ toolName, args, title }) => {
-    const originalArgs = structuredClone(args);
-    Object.freeze(args);
-    for (const type of ["item.started", "item.updated", "item.completed"] as const) {
-      const encoded = encodeEvent({
-        ...makePiRuntimeEventBase({
-          session: { threadId: ThreadId.makeUnsafe("thread-pi-title") },
-          activeTurnId: undefined,
-        }),
-        type,
-        payload: {
-          itemType: "dynamic_tool_call",
-          status: type === "item.completed" ? "completed" : "inProgress",
-          title: makePiToolTitle(toolName, args),
-          data: { args },
-        },
-      });
-      expect(JSON.parse(encoded).payload).toMatchObject({ title, data: { args: originalArgs } });
-    }
-    expect(args).toEqual(originalArgs);
-  });
+  ])(
+    "encodes lifecycle titles for $toolName without changing arguments",
+    ({ toolName, args, title }) => {
+      const originalArgs = structuredClone(args);
+      Object.freeze(args);
+      for (const type of ["item.started", "item.updated", "item.completed"] as const) {
+        const encoded = encodeEvent({
+          ...makePiRuntimeEventBase({
+            session: { threadId: ThreadId.makeUnsafe("thread-pi-title") },
+            activeTurnId: undefined,
+          }),
+          type,
+          payload: {
+            itemType: "dynamic_tool_call",
+            status: type === "item.completed" ? "completed" : "inProgress",
+            title: makePiToolTitle(toolName, args),
+            data: { args },
+          },
+        });
+        expect(JSON.parse(encoded).payload).toMatchObject({ title, data: { args: originalArgs } });
+      }
+      expect(args).toEqual(originalArgs);
+    },
+  );
 });
 
 describe("Pi native Synara gateway tools", () => {
